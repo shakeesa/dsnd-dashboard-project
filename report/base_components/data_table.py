@@ -1,31 +1,24 @@
+from fasthtml.common import Caption, Table, Tbody, Td, Th, Thead, Tr
+
 from .base_component import BaseComponent
-from fasthtml.common import Table, Tr, Th, Td
 
 
 class DataTable(BaseComponent):
-
+    caption = "Data"
 
     def build_component(self, entity_id, model):
+        if not model.name:
+            return None
 
-        if model.name:
+        data = self.component_data(entity_id, model)
+        header = Tr(*(Th(column, scope="col") for column in data.columns))
+        rows = [
+            Tr(*(Td(value) for value in data_row))
+            for data_row in data.to_numpy()
+        ]
 
-            data = self.component_data(entity_id, model)
-
-            table = Table(
-                Tr(
-                    Th(column) for column in data.columns
-                )
-            )
-
-            for data_row in data.to_numpy():
-
-                table_row = Tr(
-                    Td(val) for val in data_row
-                )
-
-                children = (*table.children, table_row)
-                table.children = children
-            
-            return table
-            
-        
+        return Table(
+            Caption(self.caption),
+            Thead(header),
+            Tbody(*rows),
+        )

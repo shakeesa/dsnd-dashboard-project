@@ -1,50 +1,43 @@
-# Import any dependencies needed to execute sql queries
-# YOUR CODE HERE
-
-# Define a class called QueryBase
-# Use inheritance to add methods
-# for querying the employee_events database.
-# YOUR CODE HERE
-
-    # Create a class attribute called `name`
-    # set the attribute to an empty string
-    # YOUR CODE HERE
-
-    # Define a `names` method that receives
-    # no passed arguments
-    # YOUR CODE HERE
-        
-        # Return an empty list
-        # YOUR CODE HERE
+from .sql_execution import QueryMixin
 
 
-    # Define an `event_counts` method
-    # that receives an `id` argument
-    # This method should return a pandas dataframe
-    # YOUR CODE HERE
+class QueryBase(QueryMixin):
+    """Provide queries shared by employee and team entities."""
 
-        # QUERY 1
-        # Write an SQL query that groups by `event_date`
-        # and sums the number of positive and negative events
-        # Use f-string formatting to set the FROM {table}
-        # to the `name` class attribute
-        # Use f-string formatting to set the name
-        # of id columns used for joining
-        # order by the event_date column
-        # YOUR CODE HERE
-            
-    
+    name = ""
 
-    # Define a `notes` method that receives an id argument
-    # This function should return a pandas dataframe
-    # YOUR CODE HERE
+    def names(self):
+        return []
 
-        # QUERY 2
-        # Write an SQL query that returns `note_date`, and `note`
-        # from the `notes` table
-        # Set the joined table names and id columns
-        # with f-string formatting
-        # so the query returns the notes
-        # for the table name in the `name` class attribute
-        # YOUR CODE HERE
+    def _entity_identifiers(self):
+        if self.name not in {"employee", "team"}:
+            raise ValueError(f"Unsupported query entity: {self.name!r}")
+        return self.name, f"{self.name}_id"
 
+    def event_counts(self, entity_id):
+        entity_name, id_column = self._entity_identifiers()
+        sql_query = f"""
+            SELECT employee_events.event_date AS event_date,
+                   SUM(employee_events.positive_events) AS positive_events,
+                   SUM(employee_events.negative_events) AS negative_events
+              FROM {entity_name}
+              JOIN employee_events
+                ON {entity_name}.{id_column} = employee_events.{id_column}
+             WHERE {entity_name}.{id_column} = ?
+             GROUP BY employee_events.event_date
+             ORDER BY employee_events.event_date ASC
+        """
+        return self.pandas_query(sql_query, (entity_id,))
+
+    def notes(self, entity_id):
+        entity_name, id_column = self._entity_identifiers()
+        sql_query = f"""
+            SELECT notes.note_date AS note_date,
+                   notes.note AS note
+              FROM {entity_name}
+              JOIN notes
+                ON {entity_name}.{id_column} = notes.{id_column}
+             WHERE {entity_name}.{id_column} = ?
+             ORDER BY notes.note_date ASC, notes."index" ASC
+        """
+        return self.pandas_query(sql_query, (entity_id,))

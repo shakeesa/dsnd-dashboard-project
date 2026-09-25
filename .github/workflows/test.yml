@@ -1,37 +1,217 @@
-# This workflow will install Python dependencies, run tests and lint with a variety of Python versions
-# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
-
-name: Tests
+name: Test and build
 
 on:
-  push:
-    branches: [ main ]
+  push: {}
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-
+  test-and-build:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: [3.10.10]
+    timeout-minutes: 15
 
     steps:
-    - uses: actions/checkout@v2
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        python -m pip install pytest
-        cd ./python-package
-        python setup.py sdist
-        cd ..
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Test with pytest
-      run: |
-        pytest
+      - name: Check out the source
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.12.14
+        uses: actions/setup-python@v7
+        with:
+          python-version: 3.12.14
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            python-package/employee_events/requirements.txt
+
+      - name: Verify the submitted source distribution
+        run: |
+          python - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import tarfile
+
+          package_root = Path("python-package")
+          archive_path = (
+              package_root / "dist" / "employee_events-0.0.tar.gz"
+          )
+          assert archive_path.is_file(), (
+              "The rubric requires the built archive at "
+              "python-package/dist/employee_events-0.0.tar.gz."
+          )
+
+          source_files = {
+              "README.md": package_root / "README.md",
+              "setup.py": package_root / "setup.py",
+              "employee_events/employee_events.db": (
+                  package_root / "employee_events" / "employee_events.db"
+              ),
+              "employee_events/requirements.txt": (
+                  package_root / "employee_events" / "requirements.txt"
+              ),
+          }
+          source_files.update(
+              {
+                  f"employee_events/{source_path.name}": source_path
+                  for source_path in sorted(
+                      (package_root / "employee_events").glob("*.py")
+                  )
+              }
+          )
+
+          archive_root = "employee_events-0.0"
+          with tarfile.open(archive_path, mode="r:gz") as archive:
+              members = archive.getmembers()
+              member_names = [member.name for member in members]
+              assert len(member_names) == len(set(member_names)), (
+                  "The submitted archive contains duplicate member names."
+              )
+              top_level_names = {
+                  PurePosixPath(name).parts[0]
+                  for name in member_names
+                  if PurePosixPath(name).parts
+              }
+              assert top_level_names == {archive_root}, top_level_names
+
+              for archive_relative_path, source_path in source_files.items():
+                  member_name = f"{archive_root}/{archive_relative_path}"
+                  try:
+                      member = archive.getmember(member_name)
+                  except KeyError as error:
+                      raise AssertionError(
+                          f"Required archive member is missing: {member_name}"
+                      ) from error
+                  assert member.isfile(), f"Not a regular file: {member_name}"
+                  archived_file = archive.extractfile(member)
+                  assert archived_file is not None, member_name
+                  assert archived_file.read() == source_path.read_bytes(), (
+                      f"Submitted archive is stale: {member_name} does not "
+                      f"match {source_path}."
+                  )
+
+              archived_python_sources = {
+                  PurePosixPath(name).name
+                  for name in member_names
+                  if name.startswith(f"{archive_root}/employee_events/")
+                  and name.endswith(".py")
+              }
+              current_python_sources = {
+                  source_path.name
+                  for source_path in (
+                      package_root / "employee_events"
+                  ).glob("*.py")
+              }
+              assert archived_python_sources == current_python_sources, (
+                  archived_python_sources,
+                  current_python_sources,
+              )
+          PY
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip check
+
+      - name: Run the test suite
+        run: python -m pytest -q
+
+      - name: Smoke-test the documented launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          dashboard_log=$(mktemp)
+          PORT=8765 ./start >"$dashboard_log" 2>&1 &
+          server_pid=$!
+
+          cleanup() {
+            status=$?
+            trap - EXIT
+            kill "$server_pid" 2>/dev/null || true
+            wait "$server_pid" 2>/dev/null || true
+            if [ "$status" -ne 0 ]; then
+              cat "$dashboard_log" || true
+            fi
+            rm -f "$dashboard_log" || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          python - <<'PY'
+          from time import monotonic, sleep
+          from urllib.error import URLError
+          from urllib.request import urlopen
+
+          base_url = "http://127.0.0.1:8765"
+          deadline = monotonic() + 45
+          last_error = None
+
+          while monotonic() < deadline:
+              try:
+                  with urlopen(f"{base_url}/", timeout=5) as response:
+                      if response.status == 200:
+                          break
+              except (OSError, URLError) as error:
+                  last_error = error
+              sleep(1)
+          else:
+              raise RuntimeError("dashboard did not start within 45 seconds") from last_error
+
+          expected_content = {
+              "/": b"Employee Performance",
+              "/employee/1": b"Employee Performance",
+              "/team/1": b"Team Performance",
+              "/assets/report.css": b".container",
+          }
+          for path, marker in expected_content.items():
+              with urlopen(f"{base_url}{path}", timeout=30) as response:
+                  body = response.read()
+                  assert response.status == 200, (path, response.status)
+                  assert marker in body, (path, marker)
+          PY
+
+      - name: Build the source distribution
+        working-directory: python-package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rebuilt_dir="$RUNNER_TEMP/rebuilt-sdist"
+          mkdir -p "$rebuilt_dir"
+          python setup.py sdist --dist-dir "$rebuilt_dir"
+          test -f "$rebuilt_dir/employee_events-0.0.tar.gz"
+
+      - name: Install and smoke-test the artifact in a clean environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive_path="$PWD/python-package/dist/employee_events-0.0.tar.gz"
+          test -f "$archive_path"
+          smoke_dir=$(mktemp -d)
+          python -m venv "$smoke_dir/venv"
+          "$smoke_dir/venv/bin/python" -m pip install --upgrade pip
+          "$smoke_dir/venv/bin/python" -m pip install "$archive_path"
+          "$smoke_dir/venv/bin/python" -m pip check
+          cd "$smoke_dir"
+          "$smoke_dir/venv/bin/python" - <<'PY'
+          from pathlib import Path
+
+          import employee_events
+          from employee_events import Employee, QueryBase, QueryMixin, Team
+          from employee_events.sql_execution import db_path
+
+          package_path = Path(employee_events.__file__).resolve().parent
+          assert package_path == db_path.parent
+          assert db_path.is_file()
+          assert Employee().username(1)
+          assert not Employee().event_counts(1).empty
+          assert Team().username(1)
+          assert issubclass(QueryBase, QueryMixin)
+          PY
+
+      - name: Upload the verified package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: employee-events-sdist
+          path: python-package/dist/employee_events-0.0.tar.gz
+          if-no-files-found: error

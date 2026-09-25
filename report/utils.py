@@ -1,19 +1,25 @@
 import pickle
 from pathlib import Path
 
-# Using the Path object, create a `project_root` variable
-# set to the absolute path for the root of this project directory
-#### YOUR CODE HERE
- 
-# Using the `project_root` variable
-# create a `model_path` variable
-# that points to the file `model.pkl`
-# inside the assets directory
-#### YOUR CODE HERE
+
+project_root = Path(__file__).resolve().parent.parent
+model_path = project_root / "assets" / "model.pkl"
+
 
 def load_model():
+    if not model_path.is_file():
+        raise FileNotFoundError(f"Recruitment model not found: {model_path}")
 
-    with model_path.open('rb') as file:
-        model = pickle.load(file)
-
-    return model
+    try:
+        with model_path.open("rb") as model_file:
+            return pickle.load(model_file)
+    except (
+        AttributeError,
+        EOFError,
+        ImportError,
+        OSError,
+        ValueError,
+        pickle.PickleError,
+    ) as error:
+        message = f"Unable to load recruitment model from {model_path}"
+        raise RuntimeError(message) from error

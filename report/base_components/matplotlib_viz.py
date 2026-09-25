@@ -1,56 +1,76 @@
+import base64
+from functools import wraps
+import io
+from threading import RLock
+
+import matplotlib
+from fasthtml.common import Div, Img, P
+
 from .base_component import BaseComponent
 
-import matplotlib.pyplot
-from fasthtml.common import Img
-import matplotlib.pylab as plt
-import matplotlib
-import io
-import base64
+# The backend must be selected before importing pyplot.
+matplotlib.use("Agg")
+from matplotlib import pyplot as plt  # noqa: E402
 
-# This is necessary to prevent matplotlib from causing memory leaks
-# https://stackoverflow.com/questions/31156578/matplotlib-doesnt-release-memory-after-savefig-and-close
-matplotlib.use('Agg')
-matplotlib.rcParams['savefig.transparent'] = True
-matplotlib.rcParams['savefig.format'] = 'png'
+matplotlib.rcParams["savefig.transparent"] = True
+matplotlib.rcParams["savefig.format"] = "png"
+
+_RENDER_LOCK = RLock()
 
 
 def matplotlib2fasthtml(func):
-    '''
-    Copy of https://github.com/koaning/fh-matplotlib, which is currently hardcoding the 
-    image format as jpg. png or svg is needed here.
-    '''
+    """Render a Matplotlib visualization as an inline FastHTML PNG image."""
+
+    @wraps(func)
     def wrapper(*args, **kwargs):
-        # Reset the figure to prevent accumulation. Maybe we need a setting for this?
-        fig = plt.figure()
+        with _RENDER_LOCK:
+            existing_figures = set(plt.get_fignums())
 
-        # Run function as normal
-        func(*args, **kwargs)
+            try:
+                figure = func(*args, **kwargs)
+                if figure is None:
+                    raise RuntimeError(
+                        "A Matplotlib visualization must return its figure"
+                    )
 
-        # Store it as base64 and put it into an image.
-        my_stringIObytes = io.BytesIO()
-        plt.savefig(my_stringIObytes)
-        my_stringIObytes.seek(0)
-        my_base64_jpgData = base64.b64encode(my_stringIObytes.read()).decode()
+                with io.BytesIO() as image_buffer:
+                    figure.savefig(image_buffer, format="png")
+                    encoded_image = base64.b64encode(
+                        image_buffer.getvalue()
+                    ).decode("ascii")
+            finally:
+                created_figures = set(plt.get_fignums()) - existing_figures
+                for figure_number in created_figures:
+                    plt.close(figure_number)
 
-        # Close the figure to prevent memory leaks
-        plt.close(fig)
-        plt.close('all')
-        return Img(src=f'data:image/jpg;base64, {my_base64_jpgData}')
+        component = args[0]
+        alt_text = getattr(
+            component,
+            "alt_text",
+            "Data visualization",
+        )
+        summary_text = getattr(component, "summary_text", alt_text)
+        return Div(
+            Img(
+                src=f"data:image/png;base64,{encoded_image}",
+                alt=alt_text,
+            ),
+            P(summary_text, cls="visualization-summary"),
+            cls="visualization",
+        )
+
     return wrapper
 
 
 class MatplotlibViz(BaseComponent):
-
     @matplotlib2fasthtml
     def build_component(self, entity_id, model):
         return self.visualization(entity_id, model)
-    
-    
-    def visualization(self, entity_id, model):
-        pass
 
-    def set_axis_styling(self, ax, bordercolor='white', fontcolor='white'):
-        
+    def visualization(self, entity_id, model):
+        raise NotImplementedError
+
+    def set_axis_styling(self, ax, bordercolor="white", fontcolor="white"):
         ax.title.set_color(fontcolor)
         ax.xaxis.label.set_color(fontcolor)
         ax.yaxis.label.set_color(fontcolor)
@@ -61,5 +81,4 @@ class MatplotlibViz(BaseComponent):
 
         for line in ax.get_lines():
             line.set_linewidth(4)
-            line.set_linestyle('dashdot')
-
+            line.set_linestyle("dashdot")
